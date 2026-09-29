@@ -77,7 +77,7 @@ jobs:
       - run: python .github/dandelion/set_version.py $VERSION
       # Keep in sync with upstream's NONCOMPAT_* flags and polars/_cpu_check.py.
       - name: Set x86-64 CPU features
-        if: runner.arch == 'X64'
+        if: ${{ runner.arch == 'X64' }}
         run: |
           echo "RUSTFLAGS=-C target-feature=+sse3,+ssse3,+sse4.1,+sse4.2,+popcnt,+cmpxchg16b,+avx,+avx2,+fma,+bmi1,+bmi2,+lzcnt,+pclmulqdq,+movbe -Z tune-cpu=skylake" >> $GITHUB_ENV
           echo "CFLAGS=-msse3 -mssse3 -msse4.1 -msse4.2 -mpopcnt -mcx16 -mavx -mavx2 -mfma -mbmi -mbmi2 -mlzcnt -mpclmul -mmovbe -mtune=skylake" >> $GITHUB_ENV
@@ -92,7 +92,8 @@ jobs:
             --interpreter python${{ matrix.python }}
             --out dist
           manylinux: 2_28
-          maturin-version: 1.8.3
+          # upstream pins 1.8.3; free-threaded Windows builds need >= 1.8.7
+          maturin-version: 1.8.7
       - uses: actions/download-artifact@v8
         with:
           name: wheel-polars

@@ -75,7 +75,7 @@ jobs:
           git commit --quiet -m "Merge upstream $TAG"
           git push origin HEAD:main
       - name: Create the release
-        if: steps.upstream.outputs.tag
+        if: ${{ steps.upstream.outputs.tag }}
         env:
           VERSION: ${{ steps.upstream.outputs.version }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
