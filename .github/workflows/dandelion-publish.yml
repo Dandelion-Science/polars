@@ -1,0 +1,153 @@
+# Build polars + polars-runtime-32 (abi3 and free-threaded cp314t wheels) for the
+# platforms we deploy on, and publish them to our pypi-store CodeArtifact repository on
+# release. Release tags are <upstream version>.postN, e.g. 1.44.2.post1.
+# Build flags mirror upstream's release-python.yml (non-compat runtime).
+name: dandelion-publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch: # dry run: build and test the wheels, publish nothing
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  VERSION: ${{ github.event.release.tag_name }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  base-package:
+    if: ${{ github.repository == 'Dandelion-Science/polars' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+      - run: python3 .github/dandelion/set_version.py $VERSION
+      - run: uv build --wheel py-polars --out-dir dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-polars
+          path: dist/*.whl
+
+  build-wheels:
+    if: ${{ github.repository == 'Dandelion-Science/polars' }}
+    needs: [base-package]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux-x64, macos-arm64, win-x64]
+        python: ["3.14", "3.14t"] # 3.14 builds the abi3 wheel
+        include:
+          - { platform: linux-x64, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { platform: macos-arm64, os: macos-15, target: aarch64-apple-darwin }
+          - { platform: win-x64, os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        uses: jlumbroso/free-disk-space@v1.3.1
+      # fat LTO + codegen-units=1 on polars-ops gets OOM-killed without swap
+      - name: Set swap space
+        if: runner.os == 'Linux'
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761 # master
+        with:
+          swap-size-gb: 10
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python .github/dandelion/set_version.py $VERSION
+      # Keep in sync with upstream's NONCOMPAT_* flags and polars/_cpu_check.py.
+      - name: Set x86-64 CPU features
+        if: runner.arch == 'X64'
+        run: |
+          echo "RUSTFLAGS=-C target-feature=+sse3,+ssse3,+sse4.1,+sse4.2,+popcnt,+cmpxchg16b,+avx,+avx2,+fma,+bmi1,+bmi2,+lzcnt,+pclmulqdq,+movbe -Z tune-cpu=skylake" >> $GITHUB_ENV
+          echo "CFLAGS=-msse3 -mssse3 -msse4.1 -msse4.2 -mpopcnt -mcx16 -mavx -mavx2 -mfma -mbmi -mbmi2 -mlzcnt -mpclmul -mmovbe -mtune=skylake" >> $GITHUB_ENV
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          args: >
+            --profile dist-release
+            --manifest-path py-polars/runtime/polars-runtime-32/Cargo.toml
+            --interpreter python${{ matrix.python }}
+            --out dist
+          manylinux: 2_28
+          maturin-version: 1.8.3
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheel-polars
+          path: dist
+      - name: Test wheel
+        run: |
+          python -m pip install dist/*.whl
+          python -c 'import polars; polars.show_versions()'
+      - name: Check that importing polars keeps the GIL disabled
+        if: endsWith(matrix.python, 't')
+        run: python -c 'import sys, polars; assert not sys._is_gil_enabled()'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-runtime-${{ matrix.platform }}-py${{ matrix.python }}
+          path: dist/polars_runtime_32-*.whl
+
+  publish:
+    if: ${{ github.repository == 'Dandelion-Science/polars' && github.event_name == 'release' }}
+    needs: [base-package, build-wheels]
+    permissions:
+      id-token: write
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: dist
+      - name: Upload wheels to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$VERSION" dist/*.whl --repo "$GITHUB_REPOSITORY"
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.ARN_IAM_ROLE_GHA_CORE }}
+      - name: Get CodeArtifact authorization token
+        env:
+          CODEARTIFACT_DOMAIN: ${{ vars.CODEARTIFACT_DOMAIN }}
+          CODEARTIFACT_DOMAIN_OWNER: ${{ vars.CODEARTIFACT_DOMAIN_OWNER }}
+        run: |
+          AWS_CODEARTIFACT_TOKEN=$(aws codeartifact get-authorization-token \
+            --domain "$CODEARTIFACT_DOMAIN" \
+            --domain-owner "$CODEARTIFACT_DOMAIN_OWNER" \
+            --query authorizationToken \
+            --output text)
+          echo "::add-mask::$AWS_CODEARTIFACT_TOKEN"
+          echo "AWS_CODEARTIFACT_TOKEN=$AWS_CODEARTIFACT_TOKEN" >> $GITHUB_ENV
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+      - run: uv publish dist/*.whl
+        env:
+          UV_PUBLISH_USERNAME: aws
+          UV_PUBLISH_PASSWORD: ${{ env.AWS_CODEARTIFACT_TOKEN }}
+          UV_PUBLISH_URL: ${{ vars.CODEARTIFACT_PYPI_STORE_REPOSITORY_URL }}

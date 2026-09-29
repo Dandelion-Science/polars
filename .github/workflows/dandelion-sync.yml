@@ -1,0 +1,84 @@
+# Merge the latest stable upstream polars 1.x release into main and cut the matching
+# <version>.post1 release, which triggers dandelion-publish. 2.x is ignored on purpose:
+# polars will ship free-threaded wheels on its own once 3.15t has a stable ABI.
+name: dandelion-sync
+
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+
+jobs:
+  sync:
+    if: ${{ github.repository == 'Dandelion-Science/polars' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # The bot token is required: the merge touches .github/workflows (rejected for
+      # GITHUB_TOKEN) and a release created with GITHUB_TOKEN would not trigger publish.
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ secrets.DANDELION_BOT_APP_ID }}
+          private-key: ${{ secrets.DANDELION_BOT_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-workflows: write
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      - name: Find the latest upstream 1.x release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git fetch --quiet https://github.com/pola-rs/polars.git 'refs/tags/py-1.*:refs/tags/py-1.*'
+          tag=$(git tag -l 'py-1.*' | grep -E '^py-1\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          version=${tag#py-}
+          if gh release view "$version.post1" > /dev/null 2>&1; then
+            echo "Release $version.post1 already exists, nothing to do."
+          else
+            echo "tag=$tag" >> $GITHUB_OUTPUT
+            echo "version=$version" >> $GITHUB_OUTPUT
+          fi
+      - name: Merge the upstream release
+        if: steps.upstream.outputs.tag
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          user_id=$(gh api "/users/${APP_SLUG}[bot]" --jq .id)
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${user_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          if git merge-base --is-ancestor "$TAG" HEAD; then
+            echo "$TAG is already merged."
+            exit 0
+          fi
+          git merge --no-ff --no-commit "$TAG" || true
+          # Upstream's workflows and dependabot config never run on the fork: drop them,
+          # which also resolves their modify/delete conflicts. Anything else is a real
+          # conflict and needs a human.
+          git ls-files .github/workflows .github/dependabot.yml \
+            | grep -v '^\.github/workflows/dandelion-' | xargs -r git rm -q
+          if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+            git diff --name-only --diff-filter=U
+            echo "::error::Merging $TAG conflicts outside of upstream's workflows."
+            exit 1
+          fi
+          git commit --quiet -m "Merge upstream $TAG"
+          git push origin HEAD:main
+      - name: Create the release
+        if: steps.upstream.outputs.tag
+        env:
+          VERSION: ${{ steps.upstream.outputs.version }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh release create "$VERSION.post1" --target main --title "$VERSION.post1" \
+            --notes "polars $VERSION rebuilt with free-threaded (cp314t) wheels."
