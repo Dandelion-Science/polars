@@ -63,11 +63,11 @@ jobs:
         with:
           persist-credentials: false
       - name: Free disk space
-        if: runner.os == 'Linux'
+        if: ${{ runner.os == 'Linux' }}
         uses: jlumbroso/free-disk-space@v1.3.1
       # fat LTO + codegen-units=1 on polars-ops gets OOM-killed without swap
       - name: Set swap space
-        if: runner.os == 'Linux'
+        if: ${{ runner.os == 'Linux' }}
         uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761 # master
         with:
           swap-size-gb: 10
@@ -102,7 +102,7 @@ jobs:
           python -m pip install dist/*.whl
           python -c 'import polars; polars.show_versions()'
       - name: Check that importing polars keeps the GIL disabled
-        if: endsWith(matrix.python, 't')
+        if: ${{ endsWith(matrix.python, 't') }}
         run: python -c 'import sys, polars; assert not sys._is_gil_enabled()'
       - uses: actions/upload-artifact@v7
         with:

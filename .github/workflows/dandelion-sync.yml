@@ -48,7 +48,7 @@ jobs:
             echo "version=$version" >> $GITHUB_OUTPUT
           fi
       - name: Merge the upstream release
-        if: steps.upstream.outputs.tag
+        if: ${{ steps.upstream.outputs.tag }}
         env:
           TAG: ${{ steps.upstream.outputs.tag }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
