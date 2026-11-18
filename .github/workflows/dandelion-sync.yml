@@ -1,0 +1,45 @@
+# Cut the <version>.post1 release of the latest stable upstream polars release, which
+# triggers dandelion-publish. Nothing is merged: dandelion-publish builds from upstream's
+# py-<version> tag directly, so main only carries the fork's CI.
+name: dandelion-sync
+
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+
+jobs:
+  sync:
+    if: ${{ github.repository == 'Dandelion-Science/polars' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # A release created with GITHUB_TOKEN would not trigger dandelion-publish.
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ secrets.DANDELION_BOT_APP_ID }}
+          private-key: ${{ secrets.DANDELION_BOT_APP_PRIVATE_KEY }}
+          permission-contents: write
+      - name: Release the latest upstream version
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version=$(git ls-remote --tags --refs https://github.com/pola-rs/polars.git 'py-*' \
+            | sed 's|.*refs/tags/py-||' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          if [ -z "$version" ]; then
+            echo "::error::No stable upstream release tag found."
+            exit 1
+          fi
+          if gh release view "$version.post1" > /dev/null 2>&1; then
+            echo "Release $version.post1 already exists, nothing to do."
+            exit 0
+          fi
+          gh release create "$version.post1" --target main --title "$version.post1" \
+            --notes "polars $version rebuilt with free-threaded (cp314t, cp315t) wheels."
